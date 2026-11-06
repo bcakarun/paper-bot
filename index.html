@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="hr">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<title>Paper bot</title>
+<!-- Ulaz u šifriranu kopiju paper-bota (objava.js; korisnik 2026-10-30). Ovdje nema podataka: lozinka → PBKDF2-SHA256 (sol i broj krugova iz kljuc.json)
+     → AES ključ + HMAC ključ za imena datoteka; d/<HMAC(ime)>.bin = iv | AES-256-GCM(gzip(sadržaj)). „app” je stranica paper-bota, koja podatke čita
+     kroz window.PAPER_STATIC.get(ime). Zapamćen je izvedeni ključ (ne lozinka) u localStorage ovog uređaja. -->
+<style>
+:root{--bg:#ECEFED;--surface:#FFFFFF;--ink:#14201B;--muted:#56645F;--line:#D5DDD9;--accent:#21508F;--on-accent:#FFFFFF;--neg:#C2382A;
+  --sans:"Barlow",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color-scheme:light}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0C1210;--surface:#131B18;--ink:#E2EAE6;--muted:#97A6A0;--line:#26322D;--accent:#8CB1EC;--on-accent:#0C1210;--neg:#F06C5A;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#0C1210;--surface:#131B18;--ink:#E2EAE6;--muted:#97A6A0;--line:#26322D;--accent:#8CB1EC;--on-accent:#0C1210;--neg:#F06C5A;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;min-height:100dvh;display:grid;place-items:center;padding:16px;background:var(--bg);color:var(--ink);font:400 16px/1.45 var(--sans)}
+form{width:min(380px,100%);background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:22px 20px;display:flex;flex-direction:column;gap:12px}
+h1{margin:0;font-size:24px;font-weight:600}
+p{margin:0;color:var(--muted);font-size:14px}
+label{font-size:14px;color:var(--muted)}
+input[type=password]{font:inherit;font-size:16px;padding:11px 12px;border-radius:9px;border:1px solid var(--line);background:var(--bg);color:var(--ink);width:100%}
+input[type=password]:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.chk{display:flex;gap:8px;align-items:center;font-size:14px;color:var(--ink)}
+button{all:unset;cursor:pointer;text-align:center;font:600 16px/1 var(--sans);padding:13px 16px;border-radius:9px;background:var(--accent);color:var(--on-accent)}
+button:disabled{opacity:.5;cursor:default}
+button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.err{color:var(--neg);font-size:14px;min-height:1.2em}
+</style>
+<form id="f" hidden>
+  <h1>Paper bot</h1>
+  <p>Kopija paper računa s računala. Podaci su šifrirani; otvaraju se lozinkom.</p>
+  <label for="pw">Lozinka</label>
+  <input id="pw" type="password" autocomplete="current-password" autocapitalize="off" spellcheck="false" required>
+  <label class="chk"><input id="rem" type="checkbox" checked> Zapamti na ovom uređaju</label>
+  <button id="go" type="submit">Otvori</button>
+  <div class="err" id="err" role="alert"></div>
+</form>
+<p id="wait">Otvaram…</p>
+<script>
+(() => {
+  "use strict";
+  const LS = "paper-kljuc", q = s => document.querySelector(s);
+  const b64d = s => Uint8Array.from(atob(s), c => c.charCodeAt(0)), b64e = u => btoa(String.fromCharCode(...u));
+  const hex = b => [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, "0")).join("");
+  let META = null, K = null;
+  const keys = async raw => ({
+    aes: await crypto.subtle.importKey("raw", raw.slice(0, 32), "AES-GCM", false, ["decrypt"]),
+    mac: await crypto.subtle.importKey("raw", raw.slice(32, 64), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]),
+  });
+  // datoteka po imenu: dešifriraj (kriv ključ → greška), raspakiraj, JSON (ili tekst za stranicu)
+  const get = async (name, text) => {
+    const f = hex(await crypto.subtle.sign("HMAC", K.mac, new TextEncoder().encode(name))).slice(0, 24);
+    const r = await fetch(`d/${f}.bin?v=${META.ver}`);
+    if (!r.ok) throw Object.assign(new Error(r.status === 404 ? "Nema podataka" : `HTTP ${r.status}`), { code: r.status });
+    const b = new Uint8Array(await r.arrayBuffer());
+    const z = await crypto.subtle.decrypt({ name: "AES-GCM", iv: b.slice(0, 12) }, K.aes, b.slice(12));
+    const t = await new Response(new Blob([z]).stream().pipeThrough(new DecompressionStream("gzip"))).text();
+    return text ? t : JSON.parse(t);
+  };
+  async function open(raw, remember) {
+    K = await keys(raw);
+    const html = await get("app", true);   // kriva lozinka → AES-GCM odbije
+    try { if (remember) localStorage.setItem(LS, b64e(raw)); } catch { }
+    window.PAPER_STATIC = { at: META.ver, get, lock: () => { try { localStorage.removeItem(LS); } catch { } location.replace(location.pathname); } };
+    // stranica paper-bota umjesto ove (skripte iz DOMParsera ne rade, pa se ponovno naprave)
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    document.documentElement.replaceWith(document.adoptNode(doc.documentElement));
+    for (const old of document.querySelectorAll("script")) {
+      const s = document.createElement("script");
+      for (const a of old.attributes) s.setAttribute(a.name, a.value);
+      s.textContent = old.textContent; old.replaceWith(s);
+    }
+  }
+  // kriv ključ: AES-GCM odbije, ili (drugo ime datoteke iz HMAC-a) stranice „app” nema → 404
+  const wrong = err => !!err && (err.name === "OperationError" || err.code === 404);
+  const ask = msg => { q("#wait").hidden = true; q("#f").hidden = false; q("#err").textContent = msg || ""; q("#pw").focus(); };
+  q("#f").addEventListener("submit", async e => {
+    e.preventDefault();
+    const pw = q("#pw").value; if (!pw) return;
+    q("#go").disabled = true; q("#err").textContent = ""; q("#go").textContent = "Otključavam…";
+    try {
+      const base = await crypto.subtle.importKey("raw", new TextEncoder().encode(pw), "PBKDF2", false, ["deriveBits"]);
+      const raw = new Uint8Array(await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt: b64d(META.salt), iterations: META.iter }, base, 512));
+      await open(raw, q("#rem").checked);
+    } catch (err) {
+      q("#go").disabled = false; q("#go").textContent = "Otvori";
+      ask(wrong(err) ? "Kriva lozinka." : `Ne mogu otvoriti: ${err.message}`);
+    }
+  });
+  (async () => {
+    try { META = await (await fetch(`kljuc.json?v=${Date.now()}`)).json(); }
+    catch (e) { q("#wait").textContent = `Ne mogu učitati stranicu (${e.message}). Pokušaj ponovno.`; return; }
+    if (!window.crypto || !crypto.subtle || typeof DecompressionStream === "undefined") { q("#wait").textContent = "Ovaj preglednik je prestar za šifriranu stranicu."; return; }
+    let saved = null; try { saved = localStorage.getItem(LS); } catch { }
+    if (!saved) return ask();
+    try { await open(b64d(saved), false); }
+    catch (err) { try { localStorage.removeItem(LS); } catch { } ask(wrong(err) ? "Lozinka je promijenjena — upiši novu." : `Ne mogu otvoriti: ${err.message}`); }
+  })();
+})();
+</script>
+</html>
